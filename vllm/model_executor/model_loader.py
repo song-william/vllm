@@ -10,6 +10,8 @@ from vllm.config import ModelConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+from transformers import LlamaForCausalLM as VanillaLlama
+from transformers import AutoModelForCausalLM
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
@@ -23,8 +25,8 @@ _MODEL_REGISTRY = {
     "GPTJForCausalLM": GPTJForCausalLM,
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "InternLMForCausalLM": InternLMForCausalLM,
-    "LlamaForCausalLM": LlamaForCausalLM,
-    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    "LlamaForCausalLM": VanillaLlama,
+    "LLaMAForCausalLM": VanillaLlama,  # For decapoda-research/llama-*
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
@@ -57,6 +59,7 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 
 def get_model(model_config: ModelConfig) -> nn.Module:
+    print(f"get_model()")
     model_class = _get_model_architecture(model_config.hf_config)
 
     # Get the quantization config.
@@ -89,15 +92,22 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
             model = model_class(model_config.hf_config, quant_config)
         else:
+            import time
+            print('in else block')
+            start_time = time.time()
+            print(model_config.hf_config)
+            model_config.hf_config.low_cpu_mem_usage = True
             model = model_class(model_config.hf_config)
+            print(f'exit else block: {time.time() - start_time}')
         if model_config.load_format == "dummy":
             model = model.cuda()
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
         else:
-            # Load the weights from the cached or downloaded files.
-            model.load_weights(model_config.model, model_config.download_dir,
-                               model_config.load_format, model_config.revision)
+            # # Load the weights from the cached or downloaded files.
+            # model.load_weights(model_config.model, model_config.download_dir,
+            #                    model_config.load_format, model_config.revision)
             model = model.cuda()
+    print('done building model')
     return model.eval()
