@@ -96,8 +96,9 @@ def get_model(model_config: ModelConfig) -> nn.Module:
             print('in else block')
             start_time = time.time()
             print(model_config.hf_config)
-            model_config.hf_config.low_cpu_mem_usage = True
-            model = model_class(model_config.hf_config)
+            # model_config.hf_config.low_cpu_mem_usage = True
+            # model = model_class(model_config.hf_config)
+            model = AutoModelForCausalLM.from_pretrained(model_config.model, config=model_config.hf_config)
             print(f'exit else block: {time.time() - start_time}')
         if model_config.load_format == "dummy":
             model = model.cuda()
