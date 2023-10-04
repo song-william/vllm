@@ -9,7 +9,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     gather_from_tensor_model_parallel_region)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceOutputs
+from vllm.sequence import SamplerOutput, SequenceOutputs, DraftOutput, DraftOutputs
 
 _SAMPLING_EPS = 1e-5
 
@@ -41,6 +41,7 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
         # Get the hidden states that we use for sampling.
+        # note, this filters hidden states to the last embedding of each sequence
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
 
         # Get the logits for the next tokens.
@@ -52,6 +53,7 @@ class Sampler(nn.Module):
         logits = logits[:, :self.vocab_size]
 
         # Apply presence and frequency penalties.
+        # Note: list will be non-zero length but have empty elements on a prompt run, since there are no output_tokens yet
         output_tokens = _get_output_tokens(input_metadata)
         assert len(output_tokens) == logits.shape[0]
         presence_penalties, frequency_penalties = _get_penalties(
@@ -81,6 +83,8 @@ class Sampler(nn.Module):
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
+        # for prompt run (filtered logits, vocab size) e.g (256, 32000)
+        # Prompt input should have only one seq
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities.
         # Use log_softmax to ensure numerical stability.
@@ -88,6 +92,73 @@ class Sampler(nn.Module):
 
         # Sample the next tokens.
         return _sample(probs, logprobs, input_metadata)
+    
+    # copy-paste them modified from `forward`
+    # remove pruning, remove token sampling and return probs
+    def forward_draft(
+        self,
+        embedding: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_metadata: InputMetadata,
+        draft_output: DraftOutput,
+        embedding_bias: Optional[torch.Tensor] = None,
+    ):
+        # Get the hidden states that we use for sampling.
+        for i in range(hidden_states.shape[0]):
+            print(f'sampler forward_draft nan count {i}: {torch.sum(torch.isnan(hidden_states[i]))}')
+        hidden_states = _prune_hidden_states_draft(hidden_states, input_metadata)
+        for i in range(hidden_states.shape[0]):
+            print(f'sampler forward_draft nan count post prune {i}: {torch.sum(torch.isnan(hidden_states[i]))}')
+
+        # Get the logits for the next tokens.
+        logits = torch.matmul(hidden_states, embedding.t())
+        if embedding_bias is not None:
+            logits += embedding_bias
+        logits = gather_from_tensor_model_parallel_region(logits)
+        # Remove paddings in vocab (if any).
+        logits = logits[:, :self.vocab_size]
+
+        # TODO: renable presence and frequency penalties
+        # Apply presence and frequency penalties.
+        # output_tokens = _get_output_tokens(input_metadata)
+        # assert len(output_tokens) == logits.shape[0]
+        # presence_penalties, frequency_penalties = _get_penalties(
+        #     input_metadata)
+        # assert len(presence_penalties) == logits.shape[0]
+        # assert len(frequency_penalties) == logits.shape[0]
+        # logits = _apply_penalties(logits, output_tokens, presence_penalties,
+        #                           frequency_penalties, self.vocab_size)
+
+        # TODO: renable temperature scaling
+        # Apply temperature scaling.
+        # temperatures = _get_temperatures(input_metadata)
+        # # assert len(temperatures) == logits.shape[0]
+        # if any(t != 1.0 for t in temperatures):
+        #     t = torch.tensor(temperatures,
+        #                      dtype=logits.dtype,
+        #                      device=logits.device)
+        #     # Use in-place division to avoid creating a new tensor.
+        #     logits.div_(t.unsqueeze(dim=1))
+
+        # TODO: renable top-p and top-k truncation
+        # Apply top-p and top-k truncation.
+        # top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
+        # assert len(top_ps) == len(top_ks) == logits.shape[0]
+        # do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
+        # do_top_k = any(k != self.vocab_size for k in top_ks)
+        # if do_top_p or do_top_k:
+        #     logits = _apply_top_p_top_k(logits, top_ps, top_ks)
+
+        # We use float32 for probabilities and log probabilities.
+        # Compute the probabilities.
+        # shape: (input_tokens = draft_len * num_seqs, vocab_size)
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        # Compute the log probabilities.
+        # Use log_softmax to ensure numerical stability.
+        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+
+        # Rejection sample the next tokens.
+        return _rejection_sample(probs, logprobs, input_metadata, draft_output)
 
 
 def _prune_hidden_states(
@@ -101,6 +172,27 @@ def _prune_hidden_states(
         start_idx += prompt_len
     last_token_indicies.extend(
         range(start_idx, start_idx + input_metadata.num_generation_tokens))
+    return hidden_states.index_select(
+        0, torch.tensor(last_token_indicies, device=hidden_states.device))
+
+def _prune_hidden_states_draft(
+    hidden_states: torch.Tensor,
+    input_metadata: InputMetadata,
+    draft_length: int = 4,
+) -> torch.Tensor:
+    '''
+    Prune hidden_states to include only the relevant states for rejection sampling.
+    For each sequence, that means draft_length + 1 states (draft_length + 1 because we include the final state to sample the next token)
+    hidden_states embeddings = [seq_0_tok0, ... seq_0_tokN, seq_0_draft_tok0, ... seq_0_draft_tokN, seq_1_tok0, ... seq_1_tokN, seq_1_draft_tok0, ... seq_1_draft_tokN, ...]
+    pruned hidden states = [seq_0_tokN, seq_0_draft_tok0, ... seq_0_draft_tokN, seq_1_tokN, seq_1_draft_tok0, ... seq_1_draft_tokN, ...]
+    '''
+    context_end_idx = 0
+    last_token_indicies: List[int] = []
+    for context_len in input_metadata.context_lens:
+        context_end_idx += context_len
+        draft_range = range(context_end_idx - draft_length - 1, context_end_idx)
+        last_token_indicies.extend(draft_range)
+    print(f'last_token_indicies {last_token_indicies}')
     return hidden_states.index_select(
         0, torch.tensor(last_token_indicies, device=hidden_states.device))
 
@@ -126,6 +218,24 @@ def _get_penalties(
 
 
 def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
+    output_tokens: List[List[int]] = []
+    for i, seq_group in enumerate(input_metadata.seq_groups):
+        seq_ids, _ = seq_group
+        if i < input_metadata.num_prompts:
+            # A prompt input.
+            # NOTE: While the prompt input usually has no output tokens,
+            # it may have output tokens in the case of recomputation.
+            seq_id = seq_ids[0]
+            seq_data = input_metadata.seq_data[seq_id]
+            output_tokens.append(seq_data.output_token_ids)
+        else:
+            # A generation token.
+            for seq_id in seq_ids:
+                seq_data = input_metadata.seq_data[seq_id]
+                output_tokens.append(seq_data.output_token_ids)
+    return output_tokens
+
+def _get_draft_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
     output_tokens: List[List[int]] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, _ = seq_group
@@ -424,5 +534,64 @@ def _sample(
                     SequenceOutputs(parent_seq_id, next_token_id,
                                     output_logprobs))
         seq_outputs.append(seq_group_outputs)
+
+    return seq_outputs
+
+def _rejection_sample(
+    target_probs: torch.Tensor,
+    target_logprobs: torch.Tensor,
+    input_metadata: InputMetadata,
+    drafts: DraftOutput,
+    draft_length: int = 4,
+) -> DraftOutput:
+    seq_outputs: DraftOutput = []
+
+    # prob.shape: (input_tokens = draft_len * num_seqs, vocab_size)
+    # generate all rejection probs at once for all draft tokens
+    # count number of nans for each row in the target_probs and print it
+    for i in range(target_probs.shape[0]):
+        print(f'nan count {torch.sum(torch.isnan(target_probs[i]))}')
+    rejection_probs = torch.rand(target_probs.shape[0])
+    seq_start_idx = 0
+    for i, seq_group in enumerate(input_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+        # Generate the next tokens for a prompt input.
+        assert len(seq_ids) == 1, "Prompt input should have only one seq."
+        parent_seq_id = seq_ids[0]
+        draft_output = drafts[i][0]  # 0 - index due to assumption of single sequence per request
+        # rejection sample each token in the draft
+        accepted_draft_index = 0
+        for draft_token_index in range(draft_length):
+            draft_token_id = draft_output.output_tokens[draft_token_index]
+            draft_prob = draft_output.probs[draft_token_index]
+            target_prob = target_probs[seq_start_idx + draft_token_index][draft_token_id]  # get the target prob for the token
+            rejection_prob = rejection_probs[seq_start_idx + draft_token_index]
+            if rejection_prob < min(1, target_prob / draft_prob):
+                accepted_draft_index += 1
+                continue
+            else:
+                break
+        print(f'accepted {accepted_draft_index} tokens')
+        print(f'target_probs idx {seq_start_idx + accepted_draft_index}')
+        print(f'non zero count {torch.nonzero(target_probs[seq_start_idx + accepted_draft_index]).size(0)}')
+        print(f'nan count {torch.sum(torch.isnan(target_probs[seq_start_idx + accepted_draft_index]))}')
+        # TODO: likely off by one on targets, if draft_length is 4 we should have 5 targets dists
+        # Sample the next tokens purely from the target distribution.
+        # start from where the accepted draft ends
+        prob = target_probs[seq_start_idx + accepted_draft_index]
+        # logprob = target_logprobs[start_idx + accepted_draft_index]
+        next_token_id = _sample_from_prompt(prob, sampling_params)[0]  # 0-index assume only one token per sequence for now
+        
+        # TODO: renable topk logprobs
+        # next_logprob = _get_topk_logprobs(logprob,
+        #                                 sampling_params.logprobs)[0]  # 0-index assume only one token per sequence for now
+        # output_logprobs = next_logprobs.copy() output_logprobs[next_token_id] = logprob[next_token_id].item()
+        output_sequence = draft_output.output_tokens[:accepted_draft_index] + [next_token_id]
+        # get target probs for each token in the output_sequence
+        sliced_probs = target_probs[seq_start_idx: seq_start_idx + accepted_draft_index + 1]
+        output_probs = sliced_probs.index_select(1, torch.tensor(output_sequence, device=target_probs.device))
+        seq_outputs.append([DraftOutputs(parent_seq_id, output_sequence, output_probs)])
+
+        seq_start_idx += input_metadata.draft_length + 1
 
     return seq_outputs

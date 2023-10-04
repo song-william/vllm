@@ -1,5 +1,6 @@
 """Utilities for selecting and loading models."""
 import contextlib
+import time
 from typing import Type
 
 import torch
@@ -10,6 +11,7 @@ from vllm.config import ModelConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+from transformers import LlamaForCausalLM as VanillaLlama, AutoModelForCausalLM
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
@@ -47,7 +49,9 @@ def _set_default_torch_dtype(dtype: torch.dtype):
 
 
 def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
+    # TODO have a forward version of llama without KV, copy paste from llama code base?
     architectures = getattr(config, "architectures", [])
+    print(f"_get_model_architecture, {config=}, {architectures=}")
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
@@ -56,7 +60,7 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def get_model(model_config: ModelConfig) -> nn.Module:
+def get_model(model_config: ModelConfig, draft=False) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
 
     # Get the quantization config.
@@ -83,10 +87,15 @@ def get_model(model_config: ModelConfig) -> nn.Module:
                 f"method {model_config.quantization}. Supported dtypes: "
                 f"{supported_dtypes}")
 
+    print(f"attempting to load model {draft=}")
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
+        start_time = time.time()
+        # draft = True
+        if draft:
+            model = AutoModelForCausalLM.from_pretrained(model_config.model, config=model_config.hf_config)
+        elif model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
             model = model_class(model_config.hf_config, quant_config)
         else:
             model = model_class(model_config.hf_config)
@@ -96,8 +105,11 @@ def get_model(model_config: ModelConfig) -> nn.Module:
             # random values to the weights.
             initialize_dummy_weights(model)
         else:
-            # Load the weights from the cached or downloaded files.
-            model.load_weights(model_config.model, model_config.download_dir,
-                               model_config.load_format, model_config.revision)
+            if not draft:
+                # Load the weights from the cached or downloaded files.
+                model.load_weights(model_config.model, model_config.download_dir,
+                                model_config.load_format, model_config.revision)
             model = model.cuda()
+    print("model loaded")
+    print(f'model loading time: {time.time() - start_time}')
     return model.eval()

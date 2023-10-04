@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from xformers.ops import AttentionBias
@@ -29,6 +29,7 @@ class InputMetadata:
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
+        draft_length: Optional[int] = None,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -37,16 +38,18 @@ class InputMetadata:
         self.context_lens = context_lens
         self.max_context_len = max_context_len
         self.block_tables = block_tables
+        self.draft_length = draft_length
 
         self.num_prompts = len(prompt_lens)
         self.num_prompt_tokens = sum(prompt_lens)
         self.num_generation_tokens = context_lens.shape[0]
-        self.num_valid_tokens = slot_mapping.shape[0]
+        self.num_valid_tokens = sum(context_lens) if draft_length else slot_mapping.shape[0]  # TODO Will: enable slot mappings for drafts
         if block_tables.numel() > 0:
             self.max_num_blocks_per_seq = block_tables.shape[1]
         else:
             self.max_num_blocks_per_seq = 0
-        assert block_tables.shape[0] == self.num_generation_tokens
+        # TODO Will: understand this assertion
+        assert draft_length is not None or block_tables.shape[0] == self.num_generation_tokens
         assert context_lens.shape[0] == self.num_generation_tokens
 
         # Set during the execution of the first attention op.

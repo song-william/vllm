@@ -54,6 +54,7 @@ class SamplingParams:
     def __init__(
         self,
         n: int = 1,
+        draft_k: int = 0,
         best_of: Optional[int] = None,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
@@ -69,6 +70,7 @@ class SamplingParams:
         logprobs: Optional[int] = None,
     ) -> None:
         self.n = n
+        self.draft_k = draft_k
         self.best_of = best_of if best_of is not None else n
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty

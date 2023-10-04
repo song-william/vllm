@@ -45,7 +45,7 @@ from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
     load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
-from vllm.sequence import SamplerOutput
+from vllm.sequence import SamplerOutput, DraftOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -294,6 +294,27 @@ class LlamaForCausalLM(nn.Module):
                                    input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
+        return next_tokens
+
+    def forward_draft(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
+        cache_events: Optional[List[torch.cuda.Event]],
+        draft_output: DraftOutput 
+    ) -> DraftOutput:
+        # (len(input_ids), output_size)
+        print(f'{positions=}')
+        hidden_states = self.model(input_ids, positions, kv_caches, input_metadata, cache_events)
+        for i in range(hidden_states.shape[0]):
+            print(f'hidden_states nan count {i}: {torch.sum(torch.isnan(hidden_states[i]))}')
+        # filter
+        # at generation step n, assuming only one seq per seqgroup
+        # hidden_states rows = [seq0[n,n+k], seq1[n,n+k], ...]
+        # next_probs = hidden_states
+        next_tokens = self.sampler.forward_draft(self.lm_head.weight, hidden_states, input_metadata, draft_output)
         return next_tokens
 
     _column_parallel_layers = []

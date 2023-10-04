@@ -13,7 +13,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupMetadata, SequenceOutputs,
-                           SequenceStatus)
+                           SequenceStatus, DraftOutput, DraftOutputs)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -62,8 +62,10 @@ class LLMEngine:
     def __init__(
         self,
         model_config: ModelConfig,
+        draft_model_config: ModelConfig,
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
+        draft_parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
@@ -81,12 +83,14 @@ class LLMEngine:
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"quantization={model_config.quantization}, "
-            f"seed={model_config.seed})")
+            f"seed={model_config.seed}")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
+        self.draft_model_config = draft_model_config
         self.cache_config = cache_config
         self.parallel_config = parallel_config
+        self.draft_parallel_config = draft_parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
         self._verify_args()
@@ -105,6 +109,7 @@ class LLMEngine:
             self._init_workers(distributed_init_method)
 
         # Profile the memory usage and initialize the cache.
+        # calls workers to profile
         self._init_cache()
 
         # Create the scheduler.
@@ -145,7 +150,8 @@ class LLMEngine:
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
-        self.workers: List[Worker] = []
+        # create worker references
+        candidate_workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
                 continue
@@ -157,15 +163,26 @@ class LLMEngine:
                     placement_group_capture_child_tasks=True),
                 **ray_remote_kwargs,
             )(RayWorker).remote(self.model_config.trust_remote_code)
-            self.workers.append(worker)
+            candidate_workers.append(worker)
+
+        # split ray workers into target and draft workers
+        if self.draft_parallel_config:
+            assert len(placement_group.bundle_specs) == self.parallel_config.world_size + self.draft_parallel_config.world_size, 'placement group size must match the sum of the world sizes for draft and target models'
+            self.workers = candidate_workers[:self.parallel_config.world_size]
+            self.draft_workers = candidate_workers[self.parallel_config.world_size:]
+            for worker in self.draft_workers:
+                worker.draft = True
+        else:
+            self.workers = candidate_workers
 
         # Initialize torch distributed process group for the workers.
+        # TODO(wsong): may want to have a seperate process group for the draft model
+        # https://github.com/scaleapi/models/blob/433a6ea2d6fefb9f198da36eb6fb4b3f2d4d3ba5/vision_foundations/vision_foundations/data/datasets/comm.py#L46
         init_torch_dist_process_group(self.workers, backend="nccl")
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
         self._run_workers("init_worker",
-                          get_all_outputs=True,
                           worker_init_fn=lambda: Worker(
                               model_config,
                               parallel_config,
@@ -175,8 +192,28 @@ class LLMEngine:
                           ))
         self._run_workers(
             "init_model",
-            get_all_outputs=True,
         )
+
+        # init draft_model
+        if self.draft_model_config:
+            init_torch_dist_process_group(self.draft_workers, backend="nccl")
+            draft_model_config = copy.deepcopy(self.draft_model_config)
+            draft_parallel_config = copy.deepcopy(self.draft_parallel_config)
+            self._run_workers("init_worker",
+                            draft_workers=True,
+                            worker_init_fn=lambda: Worker(
+                                draft_model_config,
+                                draft_parallel_config,
+                                scheduler_config,
+                                None,
+                                None,
+                                True,
+                            ),
+                            )
+            self._run_workers(
+                "init_model",
+                draft_workers=True,
+            )
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -218,10 +255,11 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
+        parallel_config = engine_configs[3]
+        draft_parallel_config = engine_configs[4]
         # Initialize the cluster.
         distributed_init_method, placement_group = initialize_cluster(
-            parallel_config)
+            parallel_config, draft_parallel_config=draft_parallel_config)
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      distributed_init_method,
@@ -533,6 +571,98 @@ class LLMEngine:
             self._log_system_stats(scheduler_outputs.prompt_run,
                                    scheduler_outputs.num_batched_tokens)
         return request_outputs
+    
+    def _process_model_outputs_speculative_sampling(
+            self, output: DraftOutput,
+            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+        # Update the scheduled sequence groups with the model outputs.
+        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
+        for seq_group, samples in zip(scheduled_seq_groups, output):
+            self._process_sequence_group_speculative_sampling(seq_group, samples)
+
+        # Free the finished sequence groups.
+        self.scheduler.free_finished_seq_groups()
+
+        # Create the outputs.
+        request_outputs: List[RequestOutput] = []
+        for seq_group in (scheduled_seq_groups +
+                          scheduler_outputs.ignored_seq_groups):
+            request_output = RequestOutput.from_seq_group(seq_group)
+            request_outputs.append(request_output)
+
+        if self.log_stats:
+            # Log the system stats.
+            self._log_system_stats(scheduler_outputs.prompt_run,
+                                   scheduler_outputs.num_batched_tokens)
+        return request_outputs
+
+    def _process_sequence_group_speculative_sampling(
+            self, seq_group: SequenceGroup,
+            samples: List[DraftOutputs]) -> None:
+        parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        existing_finished_seqs = seq_group.get_finished_seqs()
+        parent_child_dict = {
+            parent_seq.seq_id: []
+            for parent_seq in parent_seqs
+        }
+        
+        # Note, assuming only single "sample"
+        for sample in samples:
+            parent_child_dict[sample.parent_seq_id].append(sample)
+        # List of (child, parent)
+        child_seqs: List[Tuple[Sequence, Sequence]] = []
+
+        # Process the child samples for each parent sequence
+        for parent in parent_seqs:
+            child_samples: List[DraftOutputs] = parent_child_dict[
+                parent.seq_id]
+            if len(child_samples) == 0:
+                # This parent sequence has no children samples. Remove
+                # the parent sequence from the sequence group since it will
+                # not be used in the future iterations.
+                parent.status = SequenceStatus.FINISHED_ABORTED
+                seq_group.remove(parent.seq_id)
+                self.scheduler.free_seq(parent)
+                continue
+            # TODO: Note, we do not have forking for now, we will not enter this 
+            # Fork the parent sequence if there are multiple child samples.
+            # for child_sample in child_samples[:-1]:
+            #     new_child_seq_id = next(self.seq_counter)
+            #     child = parent.fork(new_child_seq_id)
+            #     child.append_token_id(child_sample.output_token,
+            #                           child_sample.logprobs)
+            #     child_seqs.append((child, parent))
+            # Continue the parent sequence for the last child sample.
+            # We reuse the parent sequence here to reduce redundant memory
+            # copies, especially when using non-beam search sampling methods.
+            last_child_sample = child_samples[-1]
+            for token_id in last_child_sample.output_tokens:
+                parent.append_token_id(token_id, {token_id: 0.5})  # TODO: enable actual logprobs
+            child_seqs.append((parent, parent))
+
+        for seq, _ in child_seqs:
+            self._decode_sequence(seq)
+            self._check_stop(seq, seq_group.sampling_params)
+
+        # Non-beam search case
+        if not seq_group.sampling_params.use_beam_search:
+            # For newly created child sequences, add them to the sequence group
+            # and fork them in block manager if they are not finished.
+            for seq, parent in child_seqs:
+                if seq is not parent:
+                    seq_group.add(seq)
+                    if not seq.is_finished():
+                        self.scheduler.fork_seq(parent, seq)
+
+            # Free the finished and selected parent sequences' memory in block
+            # manager. Keep them in the sequence group as candidate output.
+            # NOTE: we need to fork the new sequences before freeing the
+            # old sequences.
+            for seq, parent in child_seqs:
+                if seq is parent and seq.is_finished():
+                    self.scheduler.free_seq(seq)
+            return
+       
 
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
@@ -547,7 +677,11 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
 
+        print("seq_group_metadata_list", seq_group_metadata_list[0].__dict__)
+        print("scheduler_outputs", scheduler_outputs.__dict__)
+
         # Execute the model.
+        # NOTE(wsong): at this point, no sequences have had any tokens appended, sequences are only swapped in/out/copy
         output = self._run_workers(
             "execute_model",
             seq_group_metadata_list=seq_group_metadata_list,
@@ -556,7 +690,42 @@ class LLMEngine:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
 
+        # NOTE(wsong): here sequences get tokens appended and logical block lists are exteneded physical blocks are allocated
         return self._process_model_outputs(output, scheduler_outputs) + ignored
+    
+    def speculative_step(self) -> List[RequestOutput]:
+        """Performs one decoding iteration and returns newly generated results with speculative sampling.
+
+        This function performs one decoding iteration of the engine. It first
+        schedules the sequences to be executed in the next iteration and the
+        token blocks to be swapped in/out/copy. Then, it executes the model
+        and updates the scheduler with the model outputs. Finally, it decodes
+        the sequences and returns the newly generated results.
+        """
+        seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
+        if scheduler_outputs.is_empty():
+            return ignored
+        print("seq_group_metadata_list", seq_group_metadata_list[0].__dict__)
+        print("scheduler_outputs", scheduler_outputs.__dict__)
+
+        # Execute the model.
+        # NOTE(wsong): at this point, no sequences have had any tokens appended, sequences are only swapped in/out/copy
+        # draft_output = self._run_workers(
+        #     "execute_draft_model",
+        #     draft_workers=True,
+        #     seq_group_metadata_list=seq_group_metadata_list,
+        # )
+        # add drafts to seq_groups
+
+        output = self._run_workers(
+            "execute_draft_scoring",
+            seq_group_metadata_list=seq_group_metadata_list,
+            # draft_output=draft_output,
+            draft_output=[],
+        )
+
+        # NOTE(wsong): here sequences get tokens appended and logical block lists are exteneded physical blocks are allocated
+        return self._process_model_outputs_speculative_sampling(output, scheduler_outputs) + ignored
 
     def _log_system_stats(
         self,
@@ -672,18 +841,31 @@ class LLMEngine:
         method: str,
         *args,
         get_all_outputs: bool = False,
+        draft_workers: bool = False,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
         all_outputs = []
-        for worker in self.workers:
-            if self.parallel_config.worker_use_ray:
-                executor = partial(worker.execute_method.remote, method)
-            else:
-                executor = getattr(worker, method)
+        if draft_workers:
+            for worker in self.draft_workers:
+                if self.parallel_config.worker_use_ray:
+                    executor = partial(worker.execute_method.remote, method)
+                else:
+                    executor = getattr(worker, method)
 
-            output = executor(*args, **kwargs)
-            all_outputs.append(output)
+                # executing ray actor
+                output = executor(*args, **kwargs)
+                all_outputs.append(output)
+        else:
+            for worker in self.workers:
+                if self.parallel_config.worker_use_ray:
+                    executor = partial(worker.execute_method.remote, method)
+                else:
+                    executor = getattr(worker, method)
+
+                # executing ray actor
+                output = executor(*args, **kwargs)
+                all_outputs.append(output)
 
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)

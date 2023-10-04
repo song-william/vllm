@@ -124,6 +124,8 @@ class Scheduler:
         now = time.time()
 
         # Join waiting sequences if possible.
+        # NOTE(wsong): on each step, it looks like we add in all "waiting" sequences
+        # sequences are only "waiting" after initial add, and then they are either running or swapped
         if not self.swapped:
             ignored_seq_groups: List[SequenceGroup] = []
             scheduled: List[SequenceGroup] = []
@@ -308,6 +310,9 @@ class Scheduler:
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            # TODO: (wsong) will typically return None
+            # If needed, allocates new block
+            # blocks to copy only needed "Copy on Write"
             ret = self.block_manager.append_slot(seq)
             if ret is not None:
                 src_block, dst_block = ret

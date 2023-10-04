@@ -57,17 +57,22 @@ class SequenceData:
     def __init__(
         self,
         prompt_token_ids: List[int],
+        draft_token_ids: Optional[List[int]] = None,
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
+        self.draft_token_ids = draft_token_ids
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
-    def get_len(self) -> int:
-        return len(self.output_token_ids) + len(self.prompt_token_ids)
+    def get_len(self, include_draft=False) -> int:
+        length = len(self.output_token_ids) + len(self.prompt_token_ids)
+        if include_draft and self.draft_token_ids is not None:
+            length += len(self.draft_token_ids)
+        return length
 
     def get_prompt_len(self) -> int:
         return len(self.prompt_token_ids)
@@ -75,8 +80,14 @@ class SequenceData:
     def get_output_len(self) -> int:
         return len(self.output_token_ids)
 
-    def get_token_ids(self) -> List[int]:
-        return self.prompt_token_ids + self.output_token_ids
+    def get_draft_len(self) -> int:
+        return len(self.draft_token_ids) if self.draft_token_ids else 0
+
+    def get_token_ids(self, include_draft=False) -> List[int]:
+        output = self.prompt_token_ids + self.output_token_ids
+        if include_draft and self.draft_token_ids is not None:
+            output += self.draft_token_ids
+        return output
 
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
@@ -134,6 +145,8 @@ class Sequence:
         )
         self.logical_token_blocks.append(block)
 
+    # do not always assume that the second to last block is full
+    # start from the second to last block?
     def _append_tokens_to_blocks(self, token_ids: List[int]) -> None:
         cursor = 0
         while cursor < len(token_ids):
@@ -160,8 +173,8 @@ class Sequence:
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id])
 
-    def get_len(self) -> int:
-        return self.data.get_len()
+    def get_len(self, include_draft=False) -> int:
+        return self.data.get_len(include_draft=include_draft)
 
     def get_prompt_len(self) -> int:
         return self.data.get_prompt_len()
@@ -367,6 +380,28 @@ class SequenceOutputs:
                 and self.logprobs == other.logprobs)
 
 
+class DraftOutputs:
+    """The model output associated with a sequence.
+
+    Args:
+        parent_seq_id: The ID of the parent sequence (for forking in beam
+            search).
+        output_tokens: The output token IDs.
+        probs: The probs of the draft output tokens.
+    """
+
+    def __init__(
+        self,
+        parent_seq_id: int,
+        output_tokens: List[int],
+        probs: List[float],
+    ) -> None:
+        self.parent_seq_id = parent_seq_id
+        self.output_tokens = output_tokens
+        self.probs = probs
+
 # For each sequence group, we generate a list of SequenceOutputs object,
 # each of which contains one possible candidate for the next token.
 SamplerOutput = List[List[SequenceOutputs]]
+
+DraftOutput = List[List[DraftOutputs]]

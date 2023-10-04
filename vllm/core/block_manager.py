@@ -94,6 +94,7 @@ class BlockSpaceManager:
         seq = seq_group.get_seqs()[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.
+        # NOTE(wsong): this is where the blocks for the prompt are allocated and shared. Note that ref_count = num_seqs in the group
         block_table: BlockTable = []
         for _ in range(len(seq.logical_token_blocks)):
             block = self.gpu_allocator.allocate()

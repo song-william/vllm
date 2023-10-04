@@ -51,6 +51,7 @@ def get_open_port():
 
 def initialize_cluster(
     parallel_config: ParallelConfig,
+    draft_parallel_config: Optional[ParallelConfig] = None,
     engine_use_ray: bool = False,
     ray_address: Optional[str] = None,
 ) -> Tuple[str, Optional["PlacementGroup"]]:
@@ -111,7 +112,7 @@ def initialize_cluster(
         # Create a new placement group
         current_placement_group = ray.util.placement_group([{
             "GPU": 1
-        }] * parallel_config.world_size)
+        }] * (parallel_config.world_size + draft_parallel_config.world_size if draft_parallel_config else parallel_config.world_size))
         # Wait until PG is ready - this will block until all
         # requested resources are available, and will timeout
         # if they cannot be provisioned.

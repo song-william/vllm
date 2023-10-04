@@ -1,4 +1,5 @@
 import argparse
+import copy
 import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -11,6 +12,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
+    draft_model: Optional[str] = None
+    draft_tensor_parallel_size: int = 1
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
@@ -169,7 +172,7 @@ class EngineArgs:
 
     def create_engine_configs(
         self,
-    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
+    ) -> Tuple[ModelConfig, Optional[ModelConfig], CacheConfig, ParallelConfig, Optional[ParallelConfig], SchedulerConfig]:
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
@@ -181,10 +184,21 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray)
+        draft_model_config, draft_parallel_config = None, None
+        if self.draft_model:
+            draft_model_config = copy.deepcopy(model_config)
+            draft_model_config.model = self.draft_model
+
+            # always launch draft worker in seperate process
+            parallel_config.worker_use_ray = True
+            draft_parallel_config = ParallelConfig(self.pipeline_parallel_size,
+                                            self.draft_tensor_parallel_size,
+                                            True)
+            
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.get_max_model_len())
-        return model_config, cache_config, parallel_config, scheduler_config
+        return model_config, draft_model_config, cache_config, parallel_config, draft_parallel_config, scheduler_config
 
 
 @dataclass

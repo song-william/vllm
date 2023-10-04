@@ -85,6 +85,20 @@ class PagedAttention(nn.Module):
         prompt_lens = input_metadata.prompt_lens
         attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
         input_metadata.attn_bias.append(attn_bias)
+    
+    # copied from set_attn_bias but use context length instead of prompt length
+    def set_attn_bias_draft(
+        self,
+        input_metadata: InputMetadata,
+        dtype: torch.dtype,
+    ) -> None:
+        del dtype  # Unused.
+        if input_metadata.attn_bias:
+            # Already set by a previous layer.
+            return
+        context_lens = input_metadata.context_lens.tolist()
+        attn_bias = BlockDiagonalCausalMask.from_seqlens(context_lens)
+        input_metadata.attn_bias.append(attn_bias)
 
     def multi_query_kv_attention(
         self,
@@ -195,6 +209,24 @@ class PagedAttention(nn.Module):
 
         # Pre-allocate the output tensor.
         output = torch.empty_like(query)
+
+        # Compute the attention op for draft scoring and exit early.
+        if input_metadata.draft_length is not None:
+            token_length = input_metadata.num_valid_tokens
+            self.set_attn_bias_draft(input_metadata, dtype=query.dtype)
+            self.multi_query_kv_attention(
+                output[:token_length],
+                query[:token_length],
+                key[:token_length],
+                value[:token_length],
+                input_metadata,
+            )
+
+            # Wait until the cache op is done.
+            if cache_event is not None:
+                cache_event.wait()
+            
+            return output.view(-1, self.num_heads * self.head_size)
 
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens

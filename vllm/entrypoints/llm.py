@@ -1,3 +1,4 @@
+import time
 from typing import List, Optional, Union
 
 from tqdm import tqdm
@@ -58,6 +59,8 @@ class LLM:
     def __init__(
         self,
         model: str,
+        draft_model: Optional[str] = None,
+        draft_tensor_parallel_size: int = 0,
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = False,
@@ -74,6 +77,8 @@ class LLM:
             kwargs["disable_log_stats"] = True
         engine_args = EngineArgs(
             model=model,
+            draft_model=draft_model,
+            draft_tensor_parallel_size=draft_tensor_parallel_size,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,
@@ -169,13 +174,22 @@ class LLM:
             pbar = tqdm(total=num_requests, desc="Processed prompts")
         # Run the engine.
         outputs: List[RequestOutput] = []
+        start_time = time.time()
+        step_outputs = None
+        counter = 0
         while self.llm_engine.has_unfinished_requests():
+            print(f"step {counter}")
             step_outputs = self.llm_engine.step()
+            # step_outputs = self.llm_engine.speculative_step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
                         pbar.update(1)
+            counter += 1
+        generated_tokens = step_outputs[0].outputs[0].token_ids
+        print(f"toks/sec: {len(generated_tokens) / (time.time() - start_time)}")
+        print(f"outputs: {outputs}")
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.

@@ -36,7 +36,7 @@ class CacheEngine:
         self.num_heads = model_config.get_num_heads(parallel_config)
         self.dtype = model_config.dtype
 
-        self.block_size = cache_config.block_size
+        self.block_size = cache_config.block_size  # block_size in terms of tokens
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
 
