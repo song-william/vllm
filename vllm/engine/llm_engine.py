@@ -710,18 +710,20 @@ class LLMEngine:
 
         # Execute the model.
         # NOTE(wsong): at this point, no sequences have had any tokens appended, sequences are only swapped in/out/copy
-        # draft_output = self._run_workers(
-        #     "execute_draft_model",
-        #     draft_workers=True,
-        #     seq_group_metadata_list=seq_group_metadata_list,
-        # )
+        draft_output = self._run_workers(
+            "execute_draft_model",
+            draft_workers=True,
+            seq_group_metadata_list=seq_group_metadata_list,
+        )
         # add drafts to seq_groups
+        print('draft outputs')
+        [print(output_list[0]) for output_list in draft_output]
 
         output = self._run_workers(
             "execute_draft_scoring",
             seq_group_metadata_list=seq_group_metadata_list,
-            # draft_output=draft_output,
-            draft_output=[],
+            draft_output=draft_output,
+            # draft_output=[],
         )
 
         # NOTE(wsong): here sequences get tokens appended and logical block lists are exteneded physical blocks are allocated

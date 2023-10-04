@@ -418,7 +418,7 @@ class Worker:
             batch_idx_to_seq_id[i] = seq_id
         
         tokens_tensor = torch.cuda.LongTensor(batch_input_tokens)
-        print('TESTING tokens_tensor')
+        # print('TESTING tokens_tensor')
         print(f"tokens_tensor {tokens_tensor.shape=}")
         # Execute the model.
         # print(f"input_ids={input_tokens}, positions={input_positions}, input_metadata={input_metadata}, cache_events={None},")
@@ -429,7 +429,7 @@ class Worker:
         output = []
         for i, seq in enumerate(seqs):
             seq_id = batch_idx_to_seq_id[i]
-            output.append([DraftOutputs(seq_id, seq, probs[i])])
+            output.append([DraftOutputs(seq_id, seq.tolist(), probs[i])])
 
         return output
     
@@ -448,15 +448,16 @@ class Worker:
         # tokens_tensor = torch.cuda.LongTensor(input_tokens).unsqueeze(0)
         # print(f"{tokens_tensor.shape=}")
 
-        test_draft_output: DraftOutput = [
-            [DraftOutputs(0, [1,1,1,1], [0.7,0.7,0.7,0.7])],
-            [DraftOutputs(1, [2,2,2,2], [0.8,0.8,0.8,0.8])],
-        ]
+        # mock draft output for faster iteration
+        # draft_output: DraftOutput = [
+        #     [DraftOutputs(0, [1,1,1,1], [0.7,0.7,0.7,0.7])],
+        #     [DraftOutputs(1, [2,2,2,2], [0.8,0.8,0.8,0.8])],
+        # ]
 
         for seq_group_metadata in seq_group_metadata_list:
             for seq_id, seq_data in seq_group_metadata.seq_data.items():
                 # find the draft output for this seq_id and unpack nested list structure
-                draft_outputs = next(draft_output for draft_output in test_draft_output if draft_output[0].parent_seq_id == seq_id)[0]
+                draft_outputs = next(output for output in draft_output if output[0].parent_seq_id == seq_id)[0]
                 # We need to undo the append here at some point, if the drafts are not accepted we need to clean this up
                 # probably better to just add a new field at this point
                 seq_data.draft_token_ids = draft_outputs.output_tokens
@@ -474,7 +475,8 @@ class Worker:
             positions=input_positions,
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
-            draft_output=test_draft_output,
+            # draft_output=test_draft_output,
+            draft_output=draft_output,
             cache_events=None,
         )
         print(f"execute_model {input_tokens.shape=}, {input_positions.shape=}")
@@ -518,21 +520,21 @@ def sample_from_draft_model(model, initial_prompt_seq, new_tokens, temperature=1
     for _ in range(new_tokens):
         # (batch_size, vocab_size: e.g 32000)
         sample_logits = model(fin_prompt_seq).logits[:, -1, :]
-        print(f"TESTING {sample_logits.shape=}")
+        # print(f"TESTING {sample_logits.shape=}")
         
         # Compute the probabilities from logits
         # (batch_size, vocab_size: e.g 32000)
         sample_probs = get_distribution(sample_logits, temperature)
-        print(f"TESTING {sample_probs.shape=}")
+        # print(f"TESTING {sample_probs.shape=}")
         
         # (batch_size, token_index: always len 1)
         sample_tokens = sample(sample_logits, temperature=temperature)
-        print(f"TESTING {sample_tokens.shape=}")
+        # print(f"TESTING {sample_tokens.shape=}")
         
         # Extract the probability corresponding to the sampled token
         # (batch_size, prob: always len 1)
         selected_probs = sample_probs.gather(1, sample_tokens)
-        print(f"TESTING {selected_probs.shape=}")
+        # print(f"TESTING {selected_probs.shape=}")
         out_probs.append(selected_probs)
         
         # Append sampled token to fin_prompt_seq

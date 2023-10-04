@@ -104,11 +104,7 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ):
         # Get the hidden states that we use for sampling.
-        for i in range(hidden_states.shape[0]):
-            print(f'sampler forward_draft nan count {i}: {torch.sum(torch.isnan(hidden_states[i]))}')
         hidden_states = _prune_hidden_states_draft(hidden_states, input_metadata)
-        for i in range(hidden_states.shape[0]):
-            print(f'sampler forward_draft nan count post prune {i}: {torch.sum(torch.isnan(hidden_states[i]))}')
 
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
@@ -549,8 +545,6 @@ def _rejection_sample(
     # prob.shape: (input_tokens = draft_len * num_seqs, vocab_size)
     # generate all rejection probs at once for all draft tokens
     # count number of nans for each row in the target_probs and print it
-    for i in range(target_probs.shape[0]):
-        print(f'nan count {torch.sum(torch.isnan(target_probs[i]))}')
     rejection_probs = torch.rand(target_probs.shape[0])
     seq_start_idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
@@ -573,8 +567,6 @@ def _rejection_sample(
                 break
         print(f'accepted {accepted_draft_index} tokens')
         print(f'target_probs idx {seq_start_idx + accepted_draft_index}')
-        print(f'non zero count {torch.nonzero(target_probs[seq_start_idx + accepted_draft_index]).size(0)}')
-        print(f'nan count {torch.sum(torch.isnan(target_probs[seq_start_idx + accepted_draft_index]))}')
         # TODO: likely off by one on targets, if draft_length is 4 we should have 5 targets dists
         # Sample the next tokens purely from the target distribution.
         # start from where the accepted draft ends

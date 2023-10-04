@@ -399,6 +399,11 @@ class DraftOutputs:
         self.parent_seq_id = parent_seq_id
         self.output_tokens = output_tokens
         self.probs = probs
+    
+    def __repr__(self) -> str:
+        return (f"DraftOutputs({self.parent_seq_id=}, "
+                f"{self.output_tokens=}), "
+                f"{self.probs=}")
 
 # For each sequence group, we generate a list of SequenceOutputs object,
 # each of which contains one possible candidate for the next token.

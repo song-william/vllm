@@ -179,8 +179,8 @@ class LLM:
         counter = 0
         while self.llm_engine.has_unfinished_requests():
             print(f"step {counter}")
-            step_outputs = self.llm_engine.step()
-            # step_outputs = self.llm_engine.speculative_step()
+            # step_outputs = self.llm_engine.step()
+            step_outputs = self.llm_engine.speculative_step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)

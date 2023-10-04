@@ -306,10 +306,8 @@ class LlamaForCausalLM(nn.Module):
         draft_output: DraftOutput 
     ) -> DraftOutput:
         # (len(input_ids), output_size)
-        print(f'{positions=}')
+        # print(f'{positions=}')
         hidden_states = self.model(input_ids, positions, kv_caches, input_metadata, cache_events)
-        for i in range(hidden_states.shape[0]):
-            print(f'hidden_states nan count {i}: {torch.sum(torch.isnan(hidden_states[i]))}')
         # filter
         # at generation step n, assuming only one seq per seqgroup
         # hidden_states rows = [seq0[n,n+k], seq1[n,n+k], ...]
