@@ -113,6 +113,9 @@ class Sampler(nn.Module):
         logits = gather_from_tensor_model_parallel_region(logits)
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.vocab_size]
+        # topk_values, topk_indexes = torch.topk(logits, 10)
+        # print(f"forward_rejection_sample top 10 target logits {topk_values.tolist()}")
+        # print(f"forward_rejection_sample top 10 target logits indexes {topk_indexes.tolist()}")
 
         # TODO: renable presence and frequency penalties
         # Apply presence and frequency penalties.
@@ -167,6 +170,7 @@ class Sampler(nn.Module):
     ):
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states_end_of_context_lens(hidden_states, input_metadata)
+        # print(f"forward_full_context_sample hidden_states nan count {torch.isnan(hidden_states).sum(dim=1).tolist()}")
 
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
@@ -175,6 +179,9 @@ class Sampler(nn.Module):
         logits = gather_from_tensor_model_parallel_region(logits)
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.vocab_size]
+        # topk_values, topk_indexes = torch.topk(logits, 10)
+        # print(f"forward_full_context_sample top 10 draft logits values {topk_values.tolist()}")
+        # print(f"forward_full_context_sample top 10 draft logits indexes {topk_indexes.tolist()}")
 
         # TODO: renable presence and frequency penalties
         # Apply presence and frequency penalties.
@@ -209,6 +216,9 @@ class Sampler(nn.Module):
 
         # shape: (input_tokens = num_seqs, vocab_size)
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        # topk_values, topk_indexes = torch.topk(probs, 10)
+        # print(f"forward_full_context_sample top 10 target probs {topk_values.tolist()}")
+        # print(f"forward_full_context_sample top 10 target probs {topk_indexes.tolist()}")
         # Compute the log probabilities.
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
@@ -237,10 +247,10 @@ def _prune_hidden_states_end_of_context_lens(
 ) -> torch.Tensor:
     context_end_idx = 0
     last_token_indicies: List[int] = []
-    for context_len in input_metadata.context_lens:
+    for context_len in input_metadata.context_lens.tolist():
         context_end_idx += context_len
-        last_token_indicies.append(context_len)
-    print(f'last_token_indicies {last_token_indicies}')
+        last_token_indicies.append(context_end_idx - 1)
+    print(f'_prune_hidden_states_end_of_context_lens last_token_indicies {last_token_indicies}')
     return hidden_states.index_select(
         0, torch.tensor(last_token_indicies, device=hidden_states.device))
 
@@ -632,6 +642,11 @@ def _rejection_sample(
             draft_prob = draft_output.probs[draft_token_index]
             target_prob = target_probs[seq_start_idx + draft_token_index][draft_token_id]  # get the target prob for the token
             rejection_prob = rejection_probs[seq_start_idx + draft_token_index]
+            print(f"{seq_start_idx=}, {draft_token_index=}, {draft_token_id=}, {draft_prob=}, {target_prob=}, {rejection_prob=}")
+            # topk_values, topk_indexes = torch.topk(target_probs[seq_start_idx + draft_token_index], 10)
+            # print(f"_rejection_sample top 10 target probs {topk_values.tolist()}")
+            # print(f"_rejection_sample top 10 target probs {topk_indexes.tolist()}")
+            # print the indexes of the topk as we
             if rejection_prob < min(1, target_prob / draft_prob):
                 accepted_draft_index += 1
                 continue
@@ -639,12 +654,12 @@ def _rejection_sample(
                 break
         print(f'accepted {accepted_draft_index} tokens')
         print(f'target_probs idx {seq_start_idx + accepted_draft_index}')
-        # TODO: likely off by one on targets, if draft_length is 4 we should have 5 targets dists
         # Sample the next tokens purely from the target distribution.
         # start from where the accepted draft ends
         prob = target_probs[seq_start_idx + accepted_draft_index]
         # logprob = target_logprobs[start_idx + accepted_draft_index]
         next_token_id = _sample_from_prompt(prob, sampling_params)[0]  # 0-index assume only one token per sequence for now
+        print(f"pure target sample {prob[next_token_id]=}, {next_token_id=}")
         
         # TODO: renable topk logprobs
         # next_logprob = _get_topk_logprobs(logprob,

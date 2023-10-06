@@ -42,7 +42,7 @@ class InputMetadata:
 
         self.num_prompts = len(prompt_lens)
         self.num_prompt_tokens = sum(prompt_lens)
-        self.num_generation_tokens = context_lens.shape[0]
+        self.num_generation_tokens = context_lens.shape[0]  # NOTE WILL: this field is not relevant for current drafting code due to skipped KV cache
         self.num_valid_tokens = sum(context_lens) if draft_length else slot_mapping.shape[0]  # TODO Will: enable slot mappings for drafts
         if block_tables.numel() > 0:
             self.max_num_blocks_per_seq = block_tables.shape[1]

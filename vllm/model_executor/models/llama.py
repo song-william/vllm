@@ -309,6 +309,8 @@ class LlamaForCausalLM(nn.Module):
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
         print(f"LlamaForCasualLM.forward {hidden_states.shape=}")
+        # count number of nans for each row in the hidden_states and print it
+        # print(f"forward_draft hidden_states nan count {torch.isnan(hidden_states).sum(dim=1).tolist()}")
         next_tokens = self.sampler.forward_full_context_sample(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens

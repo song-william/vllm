@@ -711,7 +711,6 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
 
-        print("seq_group_metadata_list", seq_group_metadata_list[0].__dict__)
         print("scheduler_outputs", scheduler_outputs.__dict__)
 
         # Execute the model.
@@ -863,7 +862,8 @@ class LLMEngine:
             return
 
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        # TODO - we can exceed max tokens generated due to drafting, need to fix
+        if seq.get_output_len() >= sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 

@@ -447,12 +447,22 @@ class Worker:
         draft_length: int,
     ) -> DraftOutput:
 
+        # print sequence data for each group
+        for seq_group_metadata in seq_group_metadata_list:
+            for seq_id, seq_data in seq_group_metadata.seq_data.items():
+                print(f"{seq_id=}, {seq_data=}")
+
         draft_output: DraftOutput = []
         for metadata in seq_group_metadata_list:
             # assume only one sequence per sequence group (e.g no beam search or multi-sampling)
             # we keep the nested list structure to be symmetric with SamplerOutput for now
             seq_id = list(metadata.seq_data.keys())[0]
             draft_output.append([DraftOutputs(seq_id, [], [])])
+        
+        # clear any pre-existing draft tokens
+        for seq_group_metadata in seq_group_metadata_list:
+            for seq_id, seq_data in seq_group_metadata.seq_data.items():
+                seq_data.draft_token_ids = []
 
         for _ in range(draft_length):
             # Prepare input tensors.
@@ -460,7 +470,9 @@ class Worker:
                 seq_group_metadata_list, draft_length)
 
             # Execute the model.
-            print(f"input_ids={input_tokens}, positions={input_positions}, input_metadata={input_metadata}, cache_events={None},")
+            print(f"execute_draft_model: input_ids={input_tokens.tolist()}")
+            print(f"execute_draft_model: positions={input_positions.tolist()}")
+            print(f"execute_draft_model: input_metadata={input_metadata}")
             output = self.model.forward_draft(
                 input_ids=input_tokens,
                 positions=input_positions,
@@ -507,6 +519,11 @@ class Worker:
         #     [DraftOutputs(1, [2,2,2,2], [0.8,0.8,0.8,0.8])],
         # ]
 
+        # print sequence data for each group
+        for seq_group_metadata in seq_group_metadata_list:
+            for seq_id, seq_data in seq_group_metadata.seq_data.items():
+                print(f"{seq_id=}, {seq_data=}")
+
         for seq_group_metadata in seq_group_metadata_list:
             for seq_id, seq_data in seq_group_metadata.seq_data.items():
                 # find the draft output for this seq_id and unpack nested list structure
@@ -523,6 +540,9 @@ class Worker:
         # print(f"input_ids={input_tokens}, positions={input_positions}, input_metadata={input_metadata}, cache_events={None},")
         # do rejection sampling in here, since sampling logic is here already
         # we want to return type DraftOutput = List[List[DraftOutputs]] 
+        print(f"execute_rejection_sample: input_ids={input_tokens.tolist()}")
+        print(f"execute_rejection_sample: positions={input_positions.tolist()}")
+        print(f"execute_rejection_sample: input_metadata={input_metadata}")
         output = self.model.forward_rejection_sample(
             input_ids=input_tokens,
             positions=input_positions,
