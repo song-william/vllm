@@ -15,7 +15,6 @@ from vllm.sequence import DraftOutput, DraftOutputs, SamplerOutput, SequenceData
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory
 
-DRAFT_LENGTH = 4
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -265,7 +264,14 @@ class Worker:
     def _prepare_inputs_draft(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        draft_length: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
+        """
+        Copied from _prepare_inputs,
+        Includes entire sequence (prompt, generated, draft) as input.
+        Does not distinguish between prompt vs generation run. 
+        Does not include slot_mappings for KV caching. 
+        """
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -284,14 +290,13 @@ class Worker:
             seq_id = seq_ids[0]
 
             sequence_data = seq_group_metadata.seq_data[seq_id]
-            context_len = sequence_data.get_len(include_draft=True)
             prompt_lens.append(sequence_data.get_prompt_len())
+
+            context_len = sequence_data.get_len(include_draft=True)
             context_lens.append(context_len)
             context_tokens = sequence_data.get_token_ids(include_draft=True)
 
             input_tokens.extend(context_tokens)
-            # NOTE(woosuk): Here we assume that the first token in the prompt
-            # is always the first token in the sequence.
             input_positions.extend(range(len(context_tokens)))
 
             # TODO Will: the slot mapping is only neccesary for KV caching
@@ -333,7 +338,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,  # Will: only relevent for single query generation
-            draft_length=4, # TODO Will: parameterize?
+            draft_length=draft_length,
         )
         return tokens_tensor, positions_tensor, input_metadata
 
@@ -388,9 +393,10 @@ class Worker:
         return output
 
     @torch.inference_mode()
-    def execute_draft_model(
+    def execute_draft_model_hf(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        draft_length: int
     ) -> DraftOutput:
 
         # print(f"{seq_group_metadata_list=}")
@@ -423,7 +429,7 @@ class Worker:
         # Execute the model.
         # print(f"input_ids={input_tokens}, positions={input_positions}, input_metadata={input_metadata}, cache_events={None},")
         
-        seqs, probs = sample_from_draft_model(self.model, tokens_tensor, DRAFT_LENGTH)
+        seqs, probs = sample_from_draft_model(self.model, tokens_tensor, draft_length)
         print(f"seqs {seqs.shape=}, probs {probs.shape=}")
 
         output = []
@@ -433,11 +439,58 @@ class Worker:
 
         return output
     
+
     @torch.inference_mode()
-    def execute_draft_scoring(
+    def execute_draft_model(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        draft_length: int,
+    ) -> DraftOutput:
+
+        draft_output: DraftOutput = []
+        for metadata in seq_group_metadata_list:
+            # assume only one sequence per sequence group (e.g no beam search or multi-sampling)
+            # we keep the nested list structure to be symmetric with SamplerOutput for now
+            seq_id = list(metadata.seq_data.keys())[0]
+            draft_output.append([DraftOutputs(seq_id, [], [])])
+
+        for _ in range(draft_length):
+            # Prepare input tensors.
+            input_tokens, input_positions, input_metadata = self._prepare_inputs_draft(
+                seq_group_metadata_list, draft_length)
+
+            # Execute the model.
+            print(f"input_ids={input_tokens}, positions={input_positions}, input_metadata={input_metadata}, cache_events={None},")
+            output = self.model.forward_draft(
+                input_ids=input_tokens,
+                positions=input_positions,
+                kv_caches=self.gpu_cache,
+                input_metadata=input_metadata,
+                cache_events=None,
+            )
+
+            print(f"output: {output=}")
+            for seq_group_idx, seq_outputs in enumerate(output):
+                # assume only one sequence per sequence group (e.g no beam search or multi-sampling)
+                # we keep the nested list structure to be symmetric with SamplerOutput for now
+                draft, seq_output = draft_output[seq_group_idx][0], seq_outputs[0]
+
+                # append generated token to draft outputs
+                draft.output_tokens.append(seq_output.output_token)
+                draft.probs.append(seq_output.prob)
+
+                # mutate sequences to include draft token
+                seq_data = seq_group_metadata_list[seq_group_idx].seq_data[seq_output.parent_seq_id]
+                seq_data.draft_token_ids.append(seq_output.output_token)
+
+        return draft_output
+
+    @torch.inference_mode()
+    def execute_rejection_sample(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         draft_output: DraftOutput,
+        draft_length: int,
     ) -> SamplerOutput:
 
         # seq_group_metadata_list - add to prompt
@@ -464,13 +517,13 @@ class Worker:
 
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self._prepare_inputs_draft(
-            seq_group_metadata_list)
+            seq_group_metadata_list, draft_length)
 
         # Execute the model.
         # print(f"input_ids={input_tokens}, positions={input_positions}, input_metadata={input_metadata}, cache_events={None},")
         # do rejection sampling in here, since sampling logic is here already
         # we want to return type DraftOutput = List[List[DraftOutputs]] 
-        output = self.model.forward_draft(
+        output = self.model.forward_rejection_sample(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=self.gpu_cache,
@@ -495,18 +548,6 @@ def sample(logits, temperature):
     probs = get_distribution(logits, temperature)
     return torch.multinomial(probs, num_samples=1)
 
-# def sample_from_draft_model(model, initial_prompt_seq, new_tokens, temperature=1.0):
-#     fin_prompt_seq = initial_prompt_seq.detach().clone()
-#     out_logits = []
-
-#     for _ in range(new_tokens):
-#         sample_token_logits = model(fin_prompt_seq).logits[:, -1, :]
-#         sample_token = sample(sample_token_logits, temperature=temperature)
-#         fin_prompt_seq = torch.concat([fin_prompt_seq, sample_token[None,...]], dim=-1)
-#         out_logits.append(sample_token_logits)
-
-#     out_logits = torch.stack(out_logits, dim=1)
-#     return fin_prompt_seq, out_logits
 
 def sample_from_draft_model(model, initial_prompt_seq, new_tokens, temperature=1.0):
     """ Returns:

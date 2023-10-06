@@ -62,10 +62,10 @@ class LLMEngine:
     def __init__(
         self,
         model_config: ModelConfig,
-        draft_model_config: ModelConfig,
+        draft_model_config: Optional[ModelConfig],
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
-        draft_parallel_config: ParallelConfig,
+        draft_parallel_config: Optional[ParallelConfig],
         scheduler_config: SchedulerConfig,
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
@@ -111,6 +111,8 @@ class LLMEngine:
         # Profile the memory usage and initialize the cache.
         # calls workers to profile
         self._init_cache()
+        if self.draft_model_config:
+            self._init_cache_draft_model()
 
         # Create the scheduler.
         self.scheduler = Scheduler(scheduler_config, cache_config)
@@ -249,6 +251,38 @@ class LLMEngine:
 
         # Initialize the cache.
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
+    
+    def _init_cache_draft_model(self) -> None:
+        """Copied from _init_cache but use draft workers. Copies the cache_config prevent overwriting num_blocks stats"""
+        num_blocks = self._run_workers(
+            "profile_num_available_blocks",
+            draft_workers=True,
+            get_all_outputs=True,
+            block_size=self.cache_config.block_size,
+            gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
+            cpu_swap_space=self.cache_config.swap_space_bytes,
+        )
+
+        # Since we use a shared centralized controller, we take the minimum
+        # number of blocks across all workers to make sure all the memory
+        # operators can be applied to all workers.
+        num_gpu_blocks = min(b[0] for b in num_blocks)
+        num_cpu_blocks = min(b[1] for b in num_blocks)
+        # FIXME(woosuk): Change to debug log.
+        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
+                    f"# CPU blocks: {num_cpu_blocks}")
+
+        if num_gpu_blocks <= 0:
+            raise ValueError("No available memory for the cache blocks. "
+                             "Try increasing `gpu_memory_utilization` when "
+                             "initializing the engine.")
+
+        cache_config = copy.deepcopy(self.cache_config)
+        cache_config.num_gpu_blocks = num_gpu_blocks
+        cache_config.num_cpu_blocks = num_cpu_blocks
+
+        # Initialize the cache.
+        self._run_workers("init_cache_engine", draft_workers=True, cache_config=cache_config)
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
@@ -714,16 +748,17 @@ class LLMEngine:
             "execute_draft_model",
             draft_workers=True,
             seq_group_metadata_list=seq_group_metadata_list,
+            draft_length=4,
         )
         # add drafts to seq_groups
         print('draft outputs')
         [print(output_list[0]) for output_list in draft_output]
 
         output = self._run_workers(
-            "execute_draft_scoring",
+            "execute_rejection_sample",
             seq_group_metadata_list=seq_group_metadata_list,
             draft_output=draft_output,
-            # draft_output=[],
+            draft_length=4,
         )
 
         # NOTE(wsong): here sequences get tokens appended and logical block lists are exteneded physical blocks are allocated

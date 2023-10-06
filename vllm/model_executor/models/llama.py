@@ -292,11 +292,28 @@ class LlamaForCausalLM(nn.Module):
     ) -> SamplerOutput:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
+        print(f"LlamaForCasualLM.forward {hidden_states.shape=}")
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens
-
+    
+    # HACK: same as forward, but input_ids include entire context since we dont leverage the KV cache
     def forward_draft(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
+        cache_events: Optional[List[torch.cuda.Event]],
+    ) -> SamplerOutput:
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   input_metadata, cache_events)
+        print(f"LlamaForCasualLM.forward {hidden_states.shape=}")
+        next_tokens = self.sampler.forward_full_context_sample(self.lm_head.weight, hidden_states,
+                                   input_metadata)
+        return next_tokens
+
+    def forward_rejection_sample(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -312,7 +329,7 @@ class LlamaForCausalLM(nn.Module):
         # at generation step n, assuming only one seq per seqgroup
         # hidden_states rows = [seq0[n,n+k], seq1[n,n+k], ...]
         # next_probs = hidden_states
-        next_tokens = self.sampler.forward_draft(self.lm_head.weight, hidden_states, input_metadata, draft_output)
+        next_tokens = self.sampler.forward_rejection_sample(self.lm_head.weight, hidden_states, input_metadata, draft_output)
         return next_tokens
 
     _column_parallel_layers = []

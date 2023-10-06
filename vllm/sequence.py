@@ -62,7 +62,7 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
-        self.draft_token_ids = draft_token_ids
+        self.draft_token_ids: List[int] = draft_token_ids if draft_token_ids else []
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
@@ -70,7 +70,7 @@ class SequenceData:
 
     def get_len(self, include_draft=False) -> int:
         length = len(self.output_token_ids) + len(self.prompt_token_ids)
-        if include_draft and self.draft_token_ids is not None:
+        if include_draft:
             length += len(self.draft_token_ids)
         return length
 
@@ -81,11 +81,11 @@ class SequenceData:
         return len(self.output_token_ids)
 
     def get_draft_len(self) -> int:
-        return len(self.draft_token_ids) if self.draft_token_ids else 0
+        return len(self.draft_token_ids)
 
     def get_token_ids(self, include_draft=False) -> List[int]:
         output = self.prompt_token_ids + self.output_token_ids
-        if include_draft and self.draft_token_ids is not None:
+        if include_draft:
             output += self.draft_token_ids
         return output
 
@@ -362,15 +362,18 @@ class SequenceOutputs:
         parent_seq_id: int,
         output_token: int,
         logprobs: Dict[int, float],
+        prob: Optional[float] = None,
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
+        self.prob = prob
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
                 f"output_token={self.output_token}), "
-                f"logprobs={self.logprobs}")
+                f"logprobs={self.logprobs}, "
+                f"prob={self.prob}, ")
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):

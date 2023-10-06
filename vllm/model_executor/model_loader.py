@@ -92,10 +92,10 @@ def get_model(model_config: ModelConfig, draft=False) -> nn.Module:
         # Create a model instance.
         # The weights will be initialized as empty tensors.
         start_time = time.time()
-        # draft = True
-        if draft:
-            model = AutoModelForCausalLM.from_pretrained(model_config.model, config=model_config.hf_config)
-        elif model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
+        # uncomment to enable testing with HF model directly for draft model
+        # if draft:
+        #     model = AutoModelForCausalLM.from_pretrained(model_config.model, config=model_config.hf_config)
+        if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
             model = model_class(model_config.hf_config, quant_config)
         else:
             model = model_class(model_config.hf_config)

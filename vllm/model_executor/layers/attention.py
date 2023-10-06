@@ -211,7 +211,7 @@ class PagedAttention(nn.Module):
         output = torch.empty_like(query)
 
         # Compute the attention op for draft scoring and exit early.
-        if input_metadata.draft_length is not None:
+        if input_metadata.draft_length:
             token_length = input_metadata.num_valid_tokens
             self.set_attn_bias_draft(input_metadata, dtype=query.dtype)
             self.multi_query_kv_attention(

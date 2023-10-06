@@ -29,7 +29,7 @@ class InputMetadata:
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
-        draft_length: Optional[int] = None,
+        draft_length: int = 0,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -49,7 +49,7 @@ class InputMetadata:
         else:
             self.max_num_blocks_per_seq = 0
         # TODO Will: understand this assertion
-        assert draft_length is not None or block_tables.shape[0] == self.num_generation_tokens
+        assert draft_length or block_tables.shape[0] == self.num_generation_tokens
         assert context_lens.shape[0] == self.num_generation_tokens
 
         # Set during the execution of the first attention op.
